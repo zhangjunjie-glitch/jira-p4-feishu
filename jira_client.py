@@ -153,3 +153,151 @@ def get_issue_reporter(issue: Optional[dict]) -> str:
         or (reporter.get("name") or "").strip()
         or (reporter.get("emailAddress") or "").strip()
     )
+
+
+def get_issue_assignee(issue: Optional[dict]) -> str:
+    """
+    从 Jira issue 中取出经办人（assignee）的显示名。
+    优先 displayName，其次 name。
+    """
+    if not issue or not isinstance(issue, dict):
+        return ""
+    assignee = (issue.get("fields") or {}).get("assignee")
+    if not assignee or not isinstance(assignee, dict):
+        return ""
+    return (
+        (assignee.get("displayName") or "").strip()
+        or (assignee.get("name") or "").strip()
+    )
+
+
+def get_issue_status(issue: Optional[dict]) -> str:
+    """从 Jira issue 中取出状态名：fields.status.name。"""
+    if not issue or not isinstance(issue, dict):
+        return ""
+    status = (issue.get("fields") or {}).get("status")
+    if not status or not isinstance(status, dict):
+        return ""
+    return (status.get("name") or "").strip()
+
+
+def get_issue_assignee_and_status(
+    base_url: str,
+    issue_key: str,
+    email: str,
+    api_token: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    仅请求 Jira issue 的 assignee 与 status 字段，用于 Bitable 回填等轻量场景（不触发 P4/AI）。
+    Returns:
+        (assignee_display_name, status_name)，任一侧失败时为 (None, None) 或 (None, status) / (assignee, None)。
+    """
+    base_url = base_url.rstrip("/")
+    url = f"{base_url}/rest/api/2/issue/{issue_key}"
+    auth = (email, api_token)
+    headers = {"Accept": "application/json"}
+    params = {"fields": "assignee,status"}
+    try:
+        r = requests.get(url, auth=auth, headers=headers, params=params, timeout=15)
+    except requests.RequestException:
+        return None, None
+    if r.status_code != 200:
+        return None, None
+    try:
+        data = r.json()
+    except Exception:
+        return None, None
+    fields = data.get("fields") or {}
+    assignee_str = ""
+    a = fields.get("assignee")
+    if a and isinstance(a, dict):
+        assignee_str = (a.get("displayName") or a.get("name") or "").strip()
+    status_str = ""
+    s = fields.get("status")
+    if s and isinstance(s, dict):
+        status_str = (s.get("name") or "").strip()
+    return (assignee_str or None, status_str or None)
+
+
+def get_issue_assignee(issue: Optional[dict]) -> str:
+    """
+    从 Jira issue 中取出经办人（assignee）的显示名。
+    优先 displayName，其次 name，再次 emailAddress。
+    """
+    if not issue or not isinstance(issue, dict):
+        return ""
+    assignee = (issue.get("fields") or {}).get("assignee")
+    if not assignee or not isinstance(assignee, dict):
+        return ""
+    return (
+        (assignee.get("displayName") or "").strip()
+        or (assignee.get("name") or "").strip()
+        or (assignee.get("emailAddress") or "").strip()
+    )
+
+
+def get_issue_status(issue: Optional[dict]) -> str:
+    """从 Jira issue 中取出状态名（status.name）。"""
+    if not issue or not isinstance(issue, dict):
+        return ""
+    status = (issue.get("fields") or {}).get("status")
+    if not status or not isinstance(status, dict):
+        return ""
+    return (status.get("name") or "").strip()
+
+
+def get_issue_status_only(
+    base_url: str, issue_key: str, email: str, api_token: str
+) -> Optional[str]:
+    """
+    仅请求 Jira issue 的状态，用于 Bitable 状态同步。
+    返回 status.name，失败返回 None。
+    """
+    base_url = base_url.rstrip("/")
+    url = f"{base_url}/rest/api/2/issue/{issue_key}"
+    auth = (email, api_token)
+    headers = {"Accept": "application/json"}
+    params = {"fields": "status"}
+    try:
+        r = requests.get(url, auth=auth, headers=headers, params=params, timeout=15)
+    except requests.RequestException:
+        return None
+    if r.status_code != 200:
+        return None
+    try:
+        data = r.json()
+    except Exception:
+        return None
+    status = (data.get("fields") or {}).get("status")
+    if not status or not isinstance(status, dict):
+        return None
+    return (status.get("name") or "").strip() or None
+
+
+def get_issue_assignee_and_status(
+    base_url: str, issue_key: str, email: str, api_token: str
+) -> Tuple[str, str]:
+    """
+    仅请求 Jira issue 的经办人与状态，用于 Bitable 回填（不触发 P4/AI）。
+    Returns:
+        (assignee_display_name, status_name)，失败或缺失时为 ("", "")。
+    """
+    base_url = base_url.rstrip("/")
+    url = f"{base_url}/rest/api/2/issue/{issue_key}"
+    auth = (email, api_token)
+    headers = {"Accept": "application/json"}
+    params = {"fields": "assignee,status"}
+    try:
+        r = requests.get(url, auth=auth, headers=headers, params=params, timeout=15)
+    except requests.RequestException:
+        return "", ""
+    if r.status_code != 200:
+        return "", ""
+    try:
+        data = r.json()
+    except Exception:
+        return "", ""
+    fields = data.get("fields") or {}
+    assignee = get_issue_assignee({"fields": fields})
+    status = get_issue_status({"fields": fields})
+    return assignee or "", status or ""

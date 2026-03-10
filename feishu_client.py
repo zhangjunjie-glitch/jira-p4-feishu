@@ -3,10 +3,11 @@
 
 import json
 import os
+import re
 import tempfile
 import requests
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 
 FEISHU_AUTH_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
@@ -113,6 +114,81 @@ def reply_to_message(token: str, message_id: str, text: str) -> Optional[str]:
         msg = data.get("msg", "")
         return f"飞书回复消息失败: code={code}, msg={msg}"
 
+    return None
+
+
+def send_post_message_with_at(
+    token: str,
+    receive_id: str,
+    body_text: str,
+    at_open_ids: List[str],
+    receive_id_type: str = "chat_id",
+) -> Optional[str]:
+    """
+    发送富文本（post）消息，并在正文前 @ 指定用户。
+    at_open_ids: 飞书用户的 open_id 列表，会按顺序插入 at 标签。
+    """
+    if not at_open_ids:
+        return send_text_message(token, receive_id, body_text, receive_id_type)
+    elements = []
+    for oid in at_open_ids:
+        oid = (oid or "").strip()
+        if oid:
+            elements.append({"tag": "at", "user_id": oid})
+    elements.append({"tag": "text", "text": " \n\n" + (body_text or "")})
+    post_content = {"post": {"zh_cn": {"content": [elements]}}}
+    url = f"{FEISHU_MESSAGE_URL}?receive_id_type={receive_id_type}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    body = {"receive_id": receive_id, "msg_type": "post", "content": json.dumps(post_content)}
+    try:
+        r = requests.post(url, json=body, headers=headers, timeout=10)
+    except requests.RequestException as e:
+        return str(e)
+    data = r.json()
+    if r.status_code != 200:
+        return f"飞书发消息请求失败: {r.status_code} - {data}"
+    code = data.get("code")
+    if code != 0:
+        msg = data.get("msg", "")
+        if code == 230002:
+            return "飞书机器人不在对应群组中，请将机器人拉入群聊"
+        if code == 230006:
+            return "飞书应用未开启机器人能力"
+        return f"飞书发消息失败: code={code}, msg={msg}"
+    return None
+
+
+def reply_to_message_post_with_at(
+    token: str, message_id: str, body_text: str, at_open_ids: List[str]
+) -> Optional[str]:
+    """回复消息时使用 post 富文本并在正文前 @ 指定用户。"""
+    if not at_open_ids:
+        return reply_to_message(token, message_id, body_text)
+    elements = []
+    for oid in at_open_ids:
+        oid = (oid or "").strip()
+        if oid:
+            elements.append({"tag": "at", "user_id": oid})
+    elements.append({"tag": "text", "text": " \n\n" + (body_text or "")})
+    post_content = {"post": {"zh_cn": {"content": [elements]}}}
+    url = f"{FEISHU_MESSAGE_URL}/{message_id}/reply"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    body = {"msg_type": "post", "content": json.dumps(post_content)}
+    try:
+        r = requests.post(url, json=body, headers=headers, timeout=15)
+    except requests.RequestException as e:
+        return str(e)
+    data = r.json()
+    if r.status_code != 200:
+        return f"飞书回复消息失败: {r.status_code} - {data}"
+    if data.get("code") != 0:
+        return f"飞书回复消息失败: code={data.get('code')}, msg={data.get('msg', '')}"
     return None
 
 
@@ -263,6 +339,8 @@ BITABLE_FIELD_ISSUE = "JIRA单号"
 BITABLE_FIELD_TITLE = "JIRA单标题"
 BITABLE_FIELD_TIME = "JIRA单修改时间"
 BITABLE_FIELD_CREATOR = "JIRA单创建人"
+BITABLE_FIELD_ASSIGNEE = "经办人"
+BITABLE_FIELD_STATUS = "JIRA单据状态"
 BITABLE_FIELD_CL = "变更CL号"
 BITABLE_FIELD_FILES = "变更文件"
 BITABLE_FIELD_DETAIL = "变更具体内容"
@@ -314,6 +392,280 @@ def bitable_has_issue(
     return _bitable_find_record_by_issue(token, app_token, table_id, issue_key) is not None
 
 
+def _bitable_list_fields(
+    token: str, app_token: str, table_id: str
+) -> Tuple[dict, Optional[str]]:
+    """
+    获取多维表格字段列表，返回 (字段名 -> field_id 的映射, 错误信息)。
+    飞书「列出记录」返回的 fields 是以 field_id 为 key，需用此映射按列名取值。
+    """
+    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        r = requests.get(url, headers=headers, params={"page_size": 200}, timeout=15)
+    except requests.RequestException as e:
+        return {}, str(e)
+    data = r.json()
+    if r.status_code != 200 or data.get("code") != 0:
+        return {}, data.get("msg") or f"列出字段失败: {r.status_code}"
+    # 兼容 data 为数组、data.items、或顶层 items（飞书文档不一）
+    raw = data.get("data")
+    if isinstance(raw, list):
+        items = raw
+    elif isinstance(raw, dict):
+        items = raw.get("items") or raw.get("fields") or []
+    else:
+        items = data.get("items") or data.get("fields") or []
+    name_to_id = {}
+    for f in items:
+        fid = (f.get("field_id") or "").strip()
+        # 飞书文档中列出字段返回 field_name，部分版本为 name / title
+        name = (
+            (f.get("field_name") or f.get("name") or f.get("title") or "").strip()
+        )
+        if fid and name:
+            name_to_id[name] = fid
+    return name_to_id, None
+
+
+def bitable_get_field_map_and_sample_keys(
+    token: str, app_token: str, table_id: str
+) -> Tuple[dict, list, any]:
+    """
+    用于调试：返回 (列名->field_id 映射, 首条记录的 fields 的 key 列表, 首条 JIRA单号 的原始值)。
+    当回填全部被跳过时，可据此确认飞书 API 返回的字段 key 格式与取值类型。
+    """
+    name_to_id, err = _bitable_list_fields(token, app_token, table_id)
+    if err:
+        return name_to_id, [], None
+    list_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        r = requests.get(list_url, headers=headers, params={"page_size": 1}, timeout=15)
+    except requests.RequestException:
+        return name_to_id, [], None
+    data = r.json()
+    if r.status_code != 200 or data.get("code") != 0:
+        return name_to_id, [], None
+    items = (data.get("data") or {}).get("items") or []
+    if not items:
+        return name_to_id, [], None
+    fields = items[0].get("fields") or {}
+    sample_keys = list(fields.keys())
+    sample_issue_val = fields.get(BITABLE_FIELD_ISSUE)
+    fid = name_to_id.get(BITABLE_FIELD_ISSUE)
+    if sample_issue_val is None and fid:
+        sample_issue_val = fields.get(fid)
+    return name_to_id, sample_keys, sample_issue_val
+
+
+def bitable_get_first_record_fields_keys(
+    token: str, app_token: str, table_id: str, page_size: int = 500
+) -> list:
+    """调试用：用指定 page_size 拉取一页记录，返回首条记录的 fields 的 key 列表。"""
+    list_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        r = requests.get(
+            list_url, headers=headers, params={"page_size": page_size}, timeout=30
+        )
+    except requests.RequestException:
+        return []
+    data = r.json()
+    if r.status_code != 200 or data.get("code") != 0:
+        return []
+    items = (data.get("data") or {}).get("items") or []
+    if not items:
+        return []
+    return list((items[0].get("fields") or {}).keys())
+
+
+def bitable_list_record_ids_and_issue_keys(
+    token: str, app_token: str, table_id: str, page_size: int = 500
+) -> Tuple[List[Tuple[str, str]], Optional[str]]:
+    """
+    拉取多维表格记录，通过扫描每条记录的任意字段值匹配 JIRA 单号格式（XXX-123），
+    返回 [(record_id, issue_key), ...]。用于 list 接口返回的 key 与列名不一致时的兜底。
+    """
+    list_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+    headers = {"Authorization": f"Bearer {token}"}
+    jira_pat = re.compile(r"^[A-Za-z][A-Za-z0-9]*-\d+$")
+    result = []
+    page_token = None
+    while True:
+        params = {"page_size": min(500, max(1, page_size))}
+        if page_token:
+            params["page_token"] = page_token
+        try:
+            r = requests.get(list_url, headers=headers, params=params, timeout=30)
+        except requests.RequestException as e:
+            return [], str(e)
+        data = r.json()
+        if r.status_code != 200 or data.get("code") != 0:
+            return [], data.get("msg") or f"列出记录失败: {r.status_code}"
+        d = data.get("data") or {}
+        items = d.get("items") or []
+        for item in items:
+            rid = (item.get("record_id") or "").strip()
+            if not rid:
+                continue
+            fields = item.get("fields") or {}
+            if not isinstance(fields, dict):
+                continue
+            issue_key = ""
+            for v in fields.values():
+                s = (v if isinstance(v, str) else (str(v[0]) if isinstance(v, list) and v else "")) or ""
+                s = s.strip()
+                if s and "-" in s and any(c.isdigit() for c in s) and jira_pat.match(s):
+                    issue_key = s
+                    break
+            result.append((rid, issue_key))
+        has_more = d.get("has_more") is True
+        page_token = d.get("page_token") or None
+        if not has_more or not page_token:
+            break
+    return result, None
+
+
+def bitable_get_first_record_raw(
+    token: str, app_token: str, table_id: str, page_size: int = 500
+) -> Optional[dict]:
+    """调试用：返回 list records 首条记录的原始 item（含 record_id、fields 等）。"""
+    list_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        r = requests.get(
+            list_url, headers=headers, params={"page_size": page_size}, timeout=30
+        )
+    except requests.RequestException:
+        return None
+    data = r.json()
+    if r.status_code != 200 or data.get("code") != 0:
+        return None
+    items = (data.get("data") or {}).get("items") or []
+    return items[0] if items else None
+
+
+def bitable_list_records(
+    token: str,
+    app_token: str,
+    table_id: str,
+    page_size: int = 500,
+) -> Tuple[List[dict], Optional[str]]:
+    """
+    分页拉取多维表格全部记录，用于经办人/状态回填、Watcher 状态同步等。
+    返回 (records, error_message)。records 中每项为 {"record_id", "issue_key", "assignee", "status"}，
+    其中 issue_key/assignee/status 来自表字段 JIRA单号/经办人/JIRA单据状态（若存在）。
+    飞书 API 返回的 fields 以 field_id 为 key，会先拉取字段列表做列名->field_id 映射再解析。
+    """
+    name_to_id, fields_err = _bitable_list_fields(token, app_token, table_id)
+    if fields_err:
+        return [], fields_err
+    # JIRA 单号格式：PROJECT-123 等，用于无列名匹配时的兜底
+    _JIRA_KEY_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9]*-\d+$")
+
+    def _get_field(fields: dict, name: str) -> str:
+        val = fields.get(name)
+        fid = name_to_id.get(name)
+        if val is None and fid:
+            val = fields.get(fid)
+        if val is None and name:
+            name_stripped = (name or "").strip()
+            for k, v in (fields or {}).items():
+                if (k or "").strip() == name_stripped:
+                    val = v
+                    break
+            if val is None and name_stripped == BITABLE_FIELD_ISSUE:
+                for k, v in (fields or {}).items():
+                    if k and "JIRA" in str(k) and "单" in str(k) and "号" in str(k):
+                        val = v
+                        break
+        if val is None and name == BITABLE_FIELD_ISSUE and fields:
+            for v in (fields or {}).values():
+                if isinstance(v, str):
+                    s = v.strip()
+                elif isinstance(v, list) and v:
+                    s = str(v[0]).strip()
+                elif isinstance(v, dict):
+                    s = (v.get("text") or v.get("value") or "").strip() or str(v).strip()
+                else:
+                    s = str(v).strip() if v is not None else ""
+                if s and "-" in s and any(c.isdigit() for c in s):
+                    return s  # 形如 XXX-123 即视为 JIRA 单号
+        if val is None:
+            return ""
+        if isinstance(val, list):
+            return str(val[0]).strip() if val else ""
+        return (str(val).strip() or "")
+
+    list_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+    headers = {"Authorization": f"Bearer {token}"}
+    all_items = []
+    page_token = None
+    while True:
+        params = {"page_size": min(500, max(1, page_size))}
+        if page_token:
+            params["page_token"] = page_token
+        try:
+            r = requests.get(list_url, headers=headers, params=params, timeout=30)
+        except requests.RequestException as e:
+            return [], str(e)
+        data = r.json()
+        if r.status_code != 200 or data.get("code") != 0:
+            return [], data.get("msg") or f"列出记录失败: {r.status_code}"
+        d = data.get("data") or {}
+        items = d.get("items") or []
+        for idx, item in enumerate(items):
+            rid = (item.get("record_id") or "").strip()
+            if not rid:
+                continue
+            fields = item.get("fields") or {}
+            issue_key = _get_field(fields, BITABLE_FIELD_ISSUE)
+            assignee = _get_field(fields, BITABLE_FIELD_ASSIGNEE)
+            status = _get_field(fields, BITABLE_FIELD_STATUS)
+            if issue_key is None:
+                issue_key = ""
+            all_items.append({
+                "record_id": rid,
+                "issue_key": issue_key,
+                "assignee": assignee,
+                "status": status,
+            })
+        has_more = d.get("has_more") is True
+        page_token = d.get("page_token") or None
+        if not has_more or not page_token:
+            break
+    return all_items, None
+
+
+def bitable_update_record_fields(
+    token: str,
+    app_token: str,
+    table_id: str,
+    record_id: str,
+    fields_dict: dict,
+) -> Optional[str]:
+    """
+    仅更新指定记录的指定字段（如经办人、JIRA单据状态），不触达 P4/AI。
+    Returns: None 表示成功，否则为错误信息字符串。
+    """
+    if not record_id or not fields_dict:
+        return None
+    update_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    try:
+        r = requests.put(update_url, headers=headers, json={"fields": fields_dict}, timeout=15)
+    except requests.RequestException as e:
+        return str(e)
+    data = r.json()
+    if r.status_code != 200 or data.get("code") != 0:
+        return data.get("msg") or f"更新记录失败: {r.status_code}"
+    return None
+
+
 def add_report_to_bitable(
     token: str,
     app_token: str,
@@ -325,6 +677,12 @@ def add_report_to_bitable(
     full_detail: str,
     issue_reporter: str = "",
     test_scope: str = "",
+    issue_assignee: str = "",
+    issue_status: str = "",
+    *,
+    wiki_node_token: Optional[str] = None,
+    view_id: Optional[str] = None,
+    tenant_base_url: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
     """
     向已存在的多维表格写入一条变更报告：若该 JIRA单号 已存在则覆盖该记录，否则新增。
@@ -345,6 +703,8 @@ def add_report_to_bitable(
         BITABLE_FIELD_TITLE: (issue_title or "")[:2000],
         BITABLE_FIELD_TIME: (submit_times or "")[:2000],
         BITABLE_FIELD_CREATOR: (issue_reporter or "")[:500],
+        BITABLE_FIELD_ASSIGNEE: (issue_assignee or "")[:500],
+        BITABLE_FIELD_STATUS: (issue_status or "")[:200],
         BITABLE_FIELD_CL: (cl_str or "")[:2000],
         BITABLE_FIELD_FILES: (file_list or "")[:20000],
         BITABLE_FIELD_DETAIL: (f"变更分析：{brief_analysis}\n\n" if brief_analysis else "") + detail,
@@ -377,8 +737,73 @@ def add_report_to_bitable(
         if r.status_code != 200 or data.get("code") != 0:
             return None, data.get("msg") or f"多维表格写入失败: {r.status_code}"
 
-    bitable_url = f"https://open.feishu.cn/base/{app_token}"
+    if (tenant_base_url or "").strip() and (wiki_node_token or "").strip():
+        base = tenant_base_url.strip().rstrip("/")
+        bitable_url = f"{base}/wiki/{wiki_node_token.strip()}?table={table_id}"
+        if (view_id or "").strip():
+            bitable_url += f"&view={view_id.strip()}"
+    else:
+        bitable_url = f"https://open.feishu.cn/base/{app_token}"
     return bitable_url, None
+
+
+def bitable_list_records(
+    token: str, app_token: str, table_id: str, page_size: int = 500
+) -> Tuple[List[dict], Optional[str]]:
+    """
+    分页列出多维表格所有记录，返回每条的 record_id 及 fields（含 JIRA单号、JIRA单据状态等）。
+    Returns:
+        (items, error_message)，items 为 [{"record_id": "...", "fields": {...}}, ...]
+    """
+    headers = {"Authorization": f"Bearer {token}"}
+    list_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+    all_items = []
+    page_token = None
+    while True:
+        params = {"page_size": min(page_size, 500)}
+        if page_token:
+            params["page_token"] = page_token
+        try:
+            r = requests.get(list_url, headers=headers, params=params, timeout=30)
+        except requests.RequestException as e:
+            return [], str(e)
+        data = r.json()
+        if r.status_code != 200 or data.get("code") != 0:
+            return [], data.get("msg") or f"列出记录失败: {r.status_code}"
+        d = data.get("data") or {}
+        items = d.get("items") or []
+        for it in items:
+            all_items.append({
+                "record_id": (it.get("record_id") or "").strip(),
+                "fields": it.get("fields") or {},
+            })
+        if not d.get("has_more"):
+            break
+        page_token = d.get("page_token")
+        if not page_token:
+            break
+    return all_items, None
+
+
+def bitable_update_record_fields(
+    token: str, app_token: str, table_id: str, record_id: str, fields_dict: dict
+) -> Optional[str]:
+    """仅更新指定记录的指定字段。返回 None 成功，否则为错误信息。"""
+    if not (record_id or "").strip():
+        return "record_id 为空"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    update_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
+    try:
+        r = requests.put(update_url, headers=headers, json={"fields": fields_dict}, timeout=15)
+    except requests.RequestException as e:
+        return str(e)
+    data = r.json()
+    if r.status_code != 200 or data.get("code") != 0:
+        return data.get("msg") or f"更新记录失败: {r.status_code}"
+    return None
 
 
 def build_bitable_submit_times_and_files(files_by_cl: list) -> Tuple[str, str]:
@@ -483,6 +908,8 @@ def build_notification_text_short(
     jira_url: str = "",
     issue_title: str = "",
     doc_url: str = "",
+    assignee_display_name: str = "",
+    issue_status: str = "",
 ) -> str:
     """
     仅用于消息的简短版：标题、时间、CL 号、提交的文件列表、变更分析；不含 diff 内容。
@@ -496,6 +923,12 @@ def build_notification_text_short(
     ]
     if issue_title:
         lines.append(f"标题：{issue_title}")
+        lines.append("")
+    if assignee_display_name:
+        lines.append(f"经办人：{assignee_display_name}")
+        lines.append("")
+    if issue_status:
+        lines.append(f"状态：{issue_status}")
         lines.append("")
     lines.append("变更文件：")
     if files_by_cl:

@@ -12,9 +12,22 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from jira_client import get_issues_assigned_to_me
+from jira_client import (
+    get_issues_assigned_to_me,
+    get_issue_status_only,
+    get_issue_assignee_and_status,
+)
 from main import load_config, run_single_issue_flow
-from feishu_client import get_tenant_access_token, get_wiki_node_obj_token, bitable_has_issue
+from feishu_client import (
+    get_tenant_access_token,
+    get_wiki_node_obj_token,
+    bitable_has_issue,
+    bitable_list_records,
+    bitable_update_record_fields,
+    BITABLE_FIELD_ISSUE,
+    BITABLE_FIELD_ASSIGNEE,
+    BITABLE_FIELD_STATUS,
+)
 
 
 def _setup_logging(log_file: Optional[Path] = None) -> logging.Logger:
@@ -42,23 +55,44 @@ def _setup_logging(log_file: Optional[Path] = None) -> logging.Logger:
 logger: logging.Logger = logging.getLogger("jira_watcher")  # run() 内会重新配置并覆盖
 
 
-def load_state(state_path: Path) -> dict:
-    """加载已处理记录：{ issue_key: updated }"""
+def load_state(state_path: Path) -> tuple:
+    """
+    加载状态：processed 与 completed_or_cancelled。
+    Returns:
+        (processed: dict, completed_or_cancelled: set)
+        - processed: { issue_key: updated }
+        - completed_or_cancelled: 处于「已完成/已取消」的单号集合，本轮及之后不再检测直到再次变为 Testing
+    """
+    processed = {}
+    completed_or_cancelled = set()
     if not state_path.exists():
-        return {}
+        return processed, completed_or_cancelled
     try:
         with open(state_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return (data.get("processed") or {}) if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return processed, completed_or_cancelled
+        processed = data.get("processed") or {}
+        raw = data.get("completed_or_cancelled")
+        if isinstance(raw, list):
+            completed_or_cancelled = set(str(k) for k in raw if k)
+        elif isinstance(raw, dict):
+            completed_or_cancelled = set(str(k) for k in raw if k)
     except Exception:
-        return {}
+        pass
+    return processed, completed_or_cancelled
 
 
-def save_state(state_path: Path, processed: dict) -> None:
-    """持久化已处理记录"""
+def save_state(
+    state_path: Path, processed: dict, completed_or_cancelled: Optional[set] = None
+) -> None:
+    """持久化已处理记录与已完成/已取消跳过集合"""
+    payload = {"processed": processed}
+    if completed_or_cancelled is not None:
+        payload["completed_or_cancelled"] = list(completed_or_cancelled)
     try:
         with open(state_path, "w", encoding="utf-8") as f:
-            json.dump({"processed": processed}, f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.error("写入状态文件失败: %s", e)
 
@@ -89,6 +123,13 @@ def run() -> None:
         jql_extra = f'AND status = "{safe_status}"' + (" " + jql_extra if jql_extra else "")
     no_notify_if_no_cl = watcher_cfg.get("no_notify_if_no_cl") is True
     skip_if_in_bitable = watcher_cfg.get("skip_if_in_bitable", True) is not False
+    completed_statuses_raw = watcher_cfg.get("completed_statuses")
+    if isinstance(completed_statuses_raw, list):
+        completed_statuses = set(str(s).strip() for s in completed_statuses_raw if (s or "").strip())
+    elif isinstance(completed_statuses_raw, str) and completed_statuses_raw.strip():
+        completed_statuses = set(s.strip() for s in completed_statuses_raw.split(",") if s.strip())
+    else:
+        completed_statuses = {"已完成", "已取消"}
 
     if not jira_cfg.get("base_url") or not jira_cfg.get("email") or not jira_cfg.get("api_token"):
         logger.error("请配置 Jira (base_url, email, api_token)")
@@ -97,11 +138,12 @@ def run() -> None:
         logger.error("请配置 Jira 的 cl_custom_field_id")
         sys.exit(1)
 
-    processed = load_state(state_path)
+    processed, completed_or_cancelled = load_state(state_path)
     logger.info("========  Jira 分配监控已启动  ========")
     logger.info("轮询间隔: %s 秒 | 状态文件: %s | 日志文件: %s", poll_interval, state_path, log_path)
     assignee_desc = "当前用户" + ((" + " + ", ".join(assignee_extra)) if assignee_extra else "")
-    logger.info("已记录 %s 个已处理单子，将按间隔轮询 Jira（经办人=%s%s）", len(processed), assignee_desc, ("，状态=" + status_filter) if status_filter else "")
+    logger.info("已记录 %s 个已处理单子，%s 个已完成/已取消跳过；将按间隔轮询 Jira（经办人=%s%s）",
+                len(processed), len(completed_or_cancelled), assignee_desc, ("，状态=" + status_filter) if status_filter else "")
 
     try:
         while True:
@@ -144,12 +186,12 @@ def run() -> None:
                                 if bitable_has_issue(token, app_token, table_id, issue_key):
                                     logger.info("单子 %s 已存在于多维表格，跳过", issue_key)
                                     processed[issue_key] = updated or ""
-                                    save_state(state_path, processed)
+                                    save_state(state_path, processed, completed_or_cancelled)
                                     continue
                             logger.info("处理单子: %s (updated=%s)", issue_key, updated or "-")
                             if run_single_issue_flow(issue_key, config, no_notify_if_no_cl=no_notify_if_no_cl):
                                 processed[issue_key] = updated or ""
-                                save_state(state_path, processed)
+                                save_state(state_path, processed, completed_or_cancelled)
                                 logger.info("单子 %s 处理完成，已更新状态", issue_key)
                             else:
                                 logger.warning("单子 %s 处理失败，稍后重试", issue_key)
@@ -158,15 +200,110 @@ def run() -> None:
                     for key in list(processed.keys()):
                         if key not in current_keys:
                             del processed[key]
-                            save_state(state_path, processed)
+                            save_state(state_path, processed, completed_or_cancelled)
                             logger.info("单子 %s 已不再分配给我，已从状态移除", key)
+
+                    if not token and (feishu_cfg.get("app_id") and feishu_cfg.get("app_secret")):
+                        token, _ = get_tenant_access_token(
+                            feishu_cfg.get("app_id") or "", feishu_cfg.get("app_secret") or ""
+                        )
+                    if token and not app_token and (feishu_cfg.get("bitable_wiki_node_token") or "").strip():
+                        wiki_node = (feishu_cfg.get("bitable_wiki_node_token") or "").strip()
+                        obj_token, _, _ = get_wiki_node_obj_token(token, wiki_node)
+                        if obj_token:
+                            app_token = obj_token
+                    if token and app_token and table_id:
+                        try:
+                            items, list_err = bitable_list_records(token, app_token, table_id)
+                            if list_err:
+                                logger.debug("多维表格列出记录失败（状态同步跳过）: %s", list_err)
+                            else:
+                                issue_key_to_record = {}
+                                for rec in items:
+                                    rid = rec.get("record_id")
+                                    fields = rec.get("fields") or {}
+                                    issue_key = (fields.get(BITABLE_FIELD_ISSUE) or "").strip()
+                                    if issue_key and rid:
+                                        issue_key_to_record[issue_key] = (rid, fields)
+                                for rec in items:
+                                    rid = rec.get("record_id")
+                                    fields = rec.get("fields") or {}
+                                    issue_key = (fields.get(BITABLE_FIELD_ISSUE) or "").strip()
+                                    if not issue_key or not rid:
+                                        continue
+                                    if issue_key in completed_or_cancelled:
+                                        continue
+                                    current_status = (fields.get(BITABLE_FIELD_STATUS) or "").strip()
+                                    jira_status = get_issue_status_only(
+                                        jira_cfg["base_url"], issue_key,
+                                        jira_cfg["email"], jira_cfg["api_token"],
+                                    )
+                                    if jira_status is not None and jira_status != current_status:
+                                        err = bitable_update_record_fields(
+                                            token, app_token, table_id, rid,
+                                            {BITABLE_FIELD_STATUS: jira_status},
+                                        )
+                                        if err:
+                                            logger.debug("更新单号 %s 状态失败: %s", issue_key, err)
+                                        else:
+                                            logger.info("已同步单号 %s 状态为: %s", issue_key, jira_status)
+                                    if jira_status is not None and jira_status in completed_statuses:
+                                        completed_or_cancelled.add(issue_key)
+                                        save_state(state_path, processed, completed_or_cancelled)
+                                        logger.info("单号 %s 已为「%s」，后续不再检测直至再次变为 %s",
+                                                    issue_key, jira_status, status_filter or "目标状态")
+                                        continue
+                                    current_assignee = (fields.get(BITABLE_FIELD_ASSIGNEE) or "").strip()
+                                    if not current_assignee or not current_status:
+                                        assignee, status = get_issue_assignee_and_status(
+                                            jira_cfg["base_url"], issue_key,
+                                            jira_cfg["email"], jira_cfg["api_token"],
+                                        )
+                                        backfill = {}
+                                        if not current_assignee and assignee:
+                                            backfill[BITABLE_FIELD_ASSIGNEE] = assignee
+                                        if not current_status and status:
+                                            backfill[BITABLE_FIELD_STATUS] = status
+                                        if backfill:
+                                            err = bitable_update_record_fields(
+                                                token, app_token, table_id, rid, backfill,
+                                            )
+                                            if err:
+                                                logger.debug("回填单号 %s 经办人/状态失败: %s", issue_key, err)
+                                            else:
+                                                logger.info("已回填单号 %s 经办人/状态", issue_key)
+                                for issue_key in list(completed_or_cancelled):
+                                    jira_status = get_issue_status_only(
+                                        jira_cfg["base_url"], issue_key,
+                                        jira_cfg["email"], jira_cfg["api_token"],
+                                    )
+                                    if jira_status is None:
+                                        continue
+                                    if jira_status in completed_statuses:
+                                        continue
+                                    rec_info = issue_key_to_record.get(issue_key)
+                                    if not rec_info:
+                                        continue
+                                    rid, _ = rec_info
+                                    err = bitable_update_record_fields(
+                                        token, app_token, table_id, rid,
+                                        {BITABLE_FIELD_STATUS: jira_status},
+                                    )
+                                    if err:
+                                        logger.debug("单号 %s 恢复检测后更新状态失败: %s", issue_key, err)
+                                    else:
+                                        completed_or_cancelled.discard(issue_key)
+                                        save_state(state_path, processed, completed_or_cancelled)
+                                        logger.info("单号 %s 已变为「%s」，恢复检测", issue_key, jira_status)
+                        except Exception as sync_ex:
+                            logger.debug("状态同步/回填异常: %s", sync_ex)
             except Exception as e:
                 logger.exception("本轮异常: %s", e)
             logger.info("下次轮询于 %s 秒后执行", poll_interval)
             time.sleep(poll_interval)
     except KeyboardInterrupt:
         logger.info("收到退出信号，已保存状态并退出")
-        save_state(state_path, processed)
+        save_state(state_path, processed, completed_or_cancelled)
 
 
 if __name__ == "__main__":

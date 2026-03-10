@@ -18,11 +18,12 @@ except ImportError:
 
 from flask import Flask, request, jsonify
 
-from jira_client import get_issue_cls, get_issue_reporter
+from jira_client import get_issue_cls, get_issue_reporter, get_issue_assignee, get_issue_status
 from p4_client import get_changed_files_for_cls, get_project_context
 from feishu_client import (
     get_tenant_access_token,
     reply_to_message,
+    reply_to_message_post_with_at,
     build_notification_text,
     build_notification_text_short,
     create_feishu_doc_with_content,
@@ -104,6 +105,9 @@ def handle_message_event(message_id: str, content_text: str) -> None:
     failed_cls = []
     jira_url = ""
     issue_title = ""
+    issue_reporter = ""
+    issue_assignee = ""
+    issue_status = ""
     full_text = ""
 
     if not issue_key:
@@ -122,11 +126,10 @@ def handle_message_event(message_id: str, content_text: str) -> None:
             jira_url = f"{jira_cfg['base_url'].rstrip('/')}/browse/{issue_key}"
             issue_title = (issue or {}).get("fields", {}).get("summary", "").strip() if issue else ""
             issue_reporter = get_issue_reporter(issue) if issue else ""
+            issue_assignee = get_issue_assignee(issue) if issue else ""
+            issue_status = get_issue_status(issue) if issue else ""
             if not cl_list:
-                reply = f"【Jira-P4 变更提醒】{issue_key}\n\n"
-                if issue_title:
-                    reply += f"标题：{issue_title}\n\n"
-                reply += "该单号暂无关联的 P4 CL。\n\nJira: " + jira_url
+                reply = None
             else:
                 files_by_cl, failed_cls, _ = get_changed_files_for_cls(cl_list, cwd=p4_cwd)
                 full_text = build_notification_text(
@@ -175,23 +178,31 @@ def handle_message_event(message_id: str, content_text: str) -> None:
             )
         except Exception:
             pass
-    if reply is None and cl_list and files_by_cl is not None:
-        doc_url = ""
-        if full_text and token:
-            app_token = feishu_cfg.get("bitable_app_token") or ""
-            table_id = feishu_cfg.get("bitable_table_id") or ""
-            wiki_node = (feishu_cfg.get("bitable_wiki_node_token") or "").strip()
-            if wiki_node and not app_token:
-                obj_token, obj_type, _ = get_wiki_node_obj_token(token, wiki_node)
-                if obj_token and (obj_type == "bitable" or not obj_type):
-                    app_token = obj_token
-            if app_token and table_id:
-                doc_url, _ = add_report_to_bitable(
-                    token, app_token, table_id, issue_key, issue_title, cl_list, files_by_cl, full_text, issue_reporter, test_scope
-                )
-            else:
-                doc_title = f"Jira-P4 变更 {issue_key}"
-                doc_url, _ = create_feishu_doc_with_content(token, doc_title, full_text)
+    doc_url = ""
+    app_token = feishu_cfg.get("bitable_app_token") or ""
+    table_id = feishu_cfg.get("bitable_table_id") or ""
+    wiki_node = (feishu_cfg.get("bitable_wiki_node_token") or "").strip()
+    if wiki_node and not app_token and token:
+        obj_token, obj_type, _ = get_wiki_node_obj_token(token, wiki_node)
+        if obj_token and (obj_type == "bitable" or not obj_type):
+            app_token = obj_token
+    if reply is None and token and app_token and table_id:
+        tenant_base = (feishu_cfg.get("tenant_base_url") or "").strip()
+        view_id = (feishu_cfg.get("bitable_view_id") or "").strip()
+        doc_url, _ = add_report_to_bitable(
+            token, app_token, table_id, issue_key, issue_title,
+            cl_list or [], files_by_cl or [], full_text, issue_reporter, test_scope,
+            issue_assignee=issue_assignee,
+            issue_status=issue_status,
+            wiki_node_token=wiki_node or None,
+            view_id=view_id or None,
+            tenant_base_url=tenant_base or None,
+        )
+    elif reply is None and cl_list and full_text:
+        doc_title = f"Jira-P4 变更 {issue_key}"
+        doc_url, _ = create_feishu_doc_with_content(token, doc_title, full_text)
+
+    if reply is None and cl_list:
         reply = build_notification_text_short(
             issue_key=issue_key,
             cl_list=cl_list,
@@ -200,11 +211,31 @@ def handle_message_event(message_id: str, content_text: str) -> None:
             jira_url=jira_url,
             issue_title=issue_title,
             doc_url=doc_url or "",
+            assignee_display_name=issue_assignee,
+            issue_status=issue_status,
         )
+    elif reply is None and not cl_list and issue_key:
+        reply = f"【Jira-P4 变更提醒】{issue_key}\n\n"
+        if issue_title:
+            reply += f"标题：{issue_title}\n\n"
+        if issue_assignee:
+            reply += f"经办人：{issue_assignee}\n\n"
+        if issue_status:
+            reply += f"状态：{issue_status}\n\n"
+        reply += "该单号暂无关联的 P4 CL。"
+        if doc_url:
+            reply += f"\n\n详细内容见：{doc_url}"
+        reply += f"\n\nJira: {jira_url}"
 
-    err = reply_to_message(token, message_id, reply)
-    if err:
-        print(f"[Bot] 回复消息失败: {err}", flush=True)
+    if reply is not None:
+        assignee_open_id_map = feishu_cfg.get("assignee_open_id_map") or {}
+        at_open_id = assignee_open_id_map.get(issue_assignee) if isinstance(assignee_open_id_map, dict) else None
+        if at_open_id:
+            err = reply_to_message_post_with_at(token, message_id, reply, [at_open_id])
+        else:
+            err = reply_to_message(token, message_id, reply)
+        if err:
+            print(f"[Bot] 回复消息失败: {err}", flush=True)
 
 
 app = Flask(__name__)

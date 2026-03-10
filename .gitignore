@@ -6,3 +6,10 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+# 调试/临时输出
+bitable_debug.txt
+bitable_first_keys.txt
+bitable_list_records_first.txt
+out.txt
+out2.txt
+stderr.txt

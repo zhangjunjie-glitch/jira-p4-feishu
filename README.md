@@ -46,13 +46,17 @@ pip install -r requirements.txt
 | `receive_id` | 群聊的 `chat_id`（发到群）或用户的 `open_id` |
 | `receive_id_type` | `chat_id` 或 `open_id`，默认 `chat_id` |
 | `bitable_app_token` / `bitable_table_id` | 多维表格 app_token 与 table_id；或仅填 `bitable_wiki_node_token` + `bitable_table_id` 由工具解析 app_token |
-| **AI** | `ai.api_key`、`ai.provider`（如 `gemini`）、`ai.base_url`、`ai.model` 可选 |
+| `tenant_base_url` | 企业飞书域名，如 `https://xd.feishu.cn`，用于生成消息中的多维表格可打开链接（不填则用 open.feishu.cn 链接，可能提示页面不存在） |
+| `bitable_view_id` | 多维表格视图 ID（可选），填后链接会带 `&view=xxx`，直接打开指定视图 |
+| `assignee_open_id_map` | 可选。Jira 经办人显示名 → 飞书 open_id，用于消息中 @ 经办人，如 `{"姚博 YaoBo": "ou_xxx"}`。open_id 可在飞书管理后台或通过「获取用户信息」API 获取 |
+| **AI** | `ai.api_key`、`ai.provider`（如 `gemini`）、`ai.base_url`、`ai.model` 可选 |`ai.api_key`、`ai.provider`（如 `gemini`）、`ai.base_url`、`ai.model` 可选 |
 | **Watcher** | |
 | `watcher.poll_interval_seconds` | 轮询间隔（秒），默认 300 |
 | `watcher.state_file` | 状态文件路径，不填则用项目目录下 `watcher_state.json` |
 | `watcher.jql_extra` | 可选 JQL 条件，如 `AND project = PROJ` |
 | `watcher.assignee_extra` | 额外监听的经办人 Jira 用户名列表，如 `["YaoBo"]` 或逗号分隔字符串 `"YaoBo,user2"`，与当前用户一起被监控 |
 | `watcher.status_filter` | 只监控该状态的单子，如 `Testing` |
+| `watcher.completed_statuses` | 视为「终态」的状态列表，如 `["已完成", "已取消"]`。状态同步时若单号变为其中任一状态，则不再检测该单号（不请求 Jira），直到其再次变为 `status_filter` 的状态后恢复检测。默认 `["已完成", "已取消"]` |
 | `watcher.skip_if_in_bitable` | 为 true（默认）时，若该 JIRA 单号已存在于多维表格则跳过 |
 | `watcher.no_notify_if_no_cl` | 无 CL 时是否不往飞书发「暂无关联 CL」 |
 
@@ -91,6 +95,7 @@ python jira_watcher.py
 
 - 按 `watcher.poll_interval_seconds` 轮询；状态文件默认 `watcher_state.json`，日志默认控制台 + `jira_watcher.log`。
 - 同一单子若在 Jira 再次更新会再执行一次；若单子不再「分配给我」会从状态移除。退出：Ctrl+C。
+- **状态同步**：每轮会查询多维表格中已有记录的 JIRA 单号，若 Jira 状态与表中「JIRA单据状态」不一致则仅更新该列；若某条记录的「经办人」或「JIRA单据状态」为空，会从 Jira 拉取并回填（不触发 P4/AI）。当某单号状态变为「已完成/已取消」（可由 `watcher.completed_statuses` 配置）时，该单号会被加入跳过集合，之后轮询不再请求 Jira，直到其状态再次变为 `status_filter`（如 Testing）时自动恢复检测。
 - 设置 `JIRA_WATCHER_DEBUG=1` 可开调试日志。
 
 ### 群内 @ 机器人查单号
@@ -111,7 +116,7 @@ python jira_watcher.py
 ## 消息与多维表格
 
 - **飞书消息**：仅展示时间、标题、CL 号、文件列表、变更分析及 Jira 链接；行级 diff 等详见多维表格或云文档。
-- **多维表格**：配置 `bitable_app_token`+`bitable_table_id`（或 `bitable_wiki_node_token`+`bitable_table_id`）后，每次会写入/更新多维表格，消息中带表格链接。表需包含列：JIRA单号、JIRA单标题、JIRA单修改时间、JIRA单创建人、变更CL号、变更文件、变更具体内容；若启用 AI 测试范围，再加一列「测试范围」。同一 JIRA 单号已存在则覆盖该记录。
+- **多维表格**：配置 `bitable_app_token`+`bitable_table_id`（或 `bitable_wiki_node_token`+`bitable_table_id`）后，每次会写入/更新多维表格，消息中带表格链接。表需包含列：JIRA单号、JIRA单标题、JIRA单修改时间、JIRA单创建人、**经办人**、**JIRA单据状态**、变更CL号、变更文件、变更具体内容；若启用 AI 测试范围，再加一列「测试范围」。同一 JIRA 单号已存在则覆盖该记录。无 CL 的单也会录入（经办人、状态、标题等），变更文件/内容/测试范围为空。
 - **云文档**：未配置多维表格时会尝试创建飞书云文档写入完整内容，需应用有创建文档权限。
 - **AI 测试范围**：配置 `ai.api_key` 后，会根据变更内容（及变更区域的项目结构）调用大模型生成测试范围建议并写入表格「测试范围」列；`ai.provider": "gemini"` 使用 Google Gemini。
 
