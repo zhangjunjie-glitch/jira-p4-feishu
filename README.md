@@ -49,7 +49,7 @@ pip install -r requirements.txt
 | `tenant_base_url` | 企业飞书域名，如 `https://xd.feishu.cn`，用于生成消息中的多维表格可打开链接（不填则用 open.feishu.cn 链接，可能提示页面不存在） |
 | `bitable_view_id` | 多维表格视图 ID（可选），填后链接会带 `&view=xxx`，直接打开指定视图 |
 | `assignee_open_id_map` | 可选。Jira 经办人显示名 → 飞书 open_id，用于消息中 @ 经办人，如 `{"姚博 YaoBo": "ou_xxx"}`。open_id 可在飞书管理后台或通过「获取用户信息」API 获取 |
-| **AI** | `ai.api_key`、`ai.provider`（如 `gemini`）、`ai.base_url`、`ai.model` 可选 |`ai.api_key`、`ai.provider`（如 `gemini`）、`ai.base_url`、`ai.model` 可选 |
+| **AI** | `ai.api_key`、`ai.base_url`（默认 `http://127.0.0.1:8765/v1`）、`ai.model`（默认 `cursor-default`）。需先在本机启动 cursor-api-proxy 等 Cursor 本地代理 |
 | **Watcher** | |
 | `watcher.poll_interval_seconds` | 轮询间隔（秒），默认 300 |
 | `watcher.delay_after_issue_seconds` | 每处理或检查一个单子后等待秒数（默认 2），用于降低 Jira API 限流（429）概率 |
@@ -119,7 +119,7 @@ python jira_watcher.py
 - **飞书消息**：仅展示时间、标题、CL 号、文件列表、变更分析及 Jira 链接；行级 diff 等详见多维表格或云文档。
 - **多维表格**：配置 `bitable_app_token`+`bitable_table_id`（或 `bitable_wiki_node_token`+`bitable_table_id`）后，每次会写入/更新多维表格，消息中带表格链接。表需包含列：JIRA单号、JIRA单标题、JIRA单修改时间、JIRA单创建人、**经办人**、**JIRA单据状态**、变更CL号、变更文件、变更具体内容；若启用 AI 测试范围，再加一列「测试范围」。同一 JIRA 单号已存在则覆盖该记录。无 CL 的单也会录入（经办人、状态、标题等），变更文件/内容/测试范围为空。
 - **云文档**：未配置多维表格时会尝试创建飞书云文档写入完整内容，需应用有创建文档权限。
-- **AI 测试范围**：配置 `ai.api_key` 后，会根据变更内容（及变更区域的项目结构）调用大模型生成测试范围建议并写入表格「测试范围」列；`ai.provider": "gemini"` 使用 Google Gemini。
+- **AI 测试范围**：配置 `ai.api_key` 后，会根据变更内容（及变更区域的项目结构）通过 **Cursor 本地代理** 调用大模型生成测试范围建议并写入表格「测试范围」列。在 `config.json` 的 `ai` 中配置 `base_url`（默认 `http://127.0.0.1:8765/v1`）、`model`（默认 `cursor-default`）、`api_key`（代理不校验时可填任意非空字符串）。**本机启动 Cursor 代理的完整步骤见 [docs/CURSOR_PROXY_SETUP.md](docs/CURSOR_PROXY_SETUP.md)**（含 Node、agent 安装与 `npm start`）。调用逻辑与接口说明见 [docs/AI_TEST_SCOPE.md](docs/AI_TEST_SCOPE.md)。
 
 ---
 

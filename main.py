@@ -101,7 +101,6 @@ def load_config() -> dict:
     config["ai"]["api_key"] = os.environ.get("AI_API_KEY") or os.environ.get("OPENAI_API_KEY") or (config["ai"].get("api_key") if config.get("ai") else None)
     config["ai"]["base_url"] = os.environ.get("AI_BASE_URL") or config["ai"].get("base_url")
     config["ai"]["model"] = os.environ.get("AI_MODEL") or config["ai"].get("model")
-    config["ai"]["provider"] = os.environ.get("AI_PROVIDER") or config["ai"].get("provider") or ""
     config["watcher"] = config.get("watcher") or {}
     config["watcher"]["poll_interval_seconds"] = int(
         os.environ.get("JIRA_WATCHER_POLL_INTERVAL") or config["watcher"].get("poll_interval_seconds") or 300
@@ -217,7 +216,6 @@ def run_single_issue_flow(
                 api_key=ai_cfg.get("api_key") or "",
                 base_url=ai_cfg.get("base_url") or None,
                 model=ai_cfg.get("model") or None,
-                provider=ai_cfg.get("provider") or None,
                 project_context=project_context or None,
             )
         except Exception as e:
