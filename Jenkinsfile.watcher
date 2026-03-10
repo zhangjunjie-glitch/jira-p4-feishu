@@ -1,5 +1,5 @@
 // Jira 分配监控 - Jenkins Pipeline 示例
-// 仓库拉取后代码在工作区根目录，直接在此执行 pip 与 python
+// 使用虚拟环境避免与机器上已有包冲突；运行前需在工作区放置 config.json（不提交到 Git）
 pipeline {
   agent any
   options {
@@ -11,9 +11,10 @@ pipeline {
       steps {
         script {
           if (isUnix()) {
-            sh 'pip install -r requirements.txt -q'
+            sh 'python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -q'
           } else {
-            bat 'pip install -r requirements.txt -q'
+            bat 'python -m venv .venv'
+            bat '.venv\\Scripts\\pip install -r requirements.txt -q'
           }
         }
       }
@@ -22,9 +23,9 @@ pipeline {
       steps {
         script {
           if (isUnix()) {
-            sh 'python -u jira_watcher.py'
+            sh '.venv/bin/python -u jira_watcher.py'
           } else {
-            bat 'python -u jira_watcher.py'
+            bat '.venv\\Scripts\\python.exe -u jira_watcher.py'
           }
         }
       }
