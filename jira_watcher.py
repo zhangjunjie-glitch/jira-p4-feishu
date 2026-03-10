@@ -104,6 +104,7 @@ def run() -> None:
     jira_cfg = config.get("jira") or {}
     watcher_cfg = config.get("watcher") or {}
     poll_interval = max(30, int(watcher_cfg.get("poll_interval_seconds") or 300))
+    delay_after_issue = max(0, float(watcher_cfg.get("delay_after_issue_seconds") or 2))
     state_file = (watcher_cfg.get("state_file") or "").strip()
     state_path = Path(state_file) if state_file else root / "watcher_state.json"
     log_file_raw = os.environ.get("JIRA_WATCHER_LOG_FILE") or watcher_cfg.get("log_file") or ""
@@ -187,6 +188,8 @@ def run() -> None:
                                     logger.info("单子 %s 已存在于多维表格，跳过", issue_key)
                                     processed[issue_key] = updated or ""
                                     save_state(state_path, processed, completed_or_cancelled)
+                                    if delay_after_issue > 0:
+                                        time.sleep(delay_after_issue)
                                     continue
                             logger.info("处理单子: %s (updated=%s)", issue_key, updated or "-")
                             if run_single_issue_flow(issue_key, config, no_notify_if_no_cl=no_notify_if_no_cl):
@@ -195,6 +198,8 @@ def run() -> None:
                                 logger.info("单子 %s 处理完成，已更新状态", issue_key)
                             else:
                                 logger.warning("单子 %s 处理失败，稍后重试", issue_key)
+                            if delay_after_issue > 0:
+                                time.sleep(delay_after_issue)
                     if need_run == 0 and issues:
                         logger.debug("本轮无需处理的单子（均已处理且无更新），跳过")
                     for key in list(processed.keys()):
@@ -252,6 +257,8 @@ def run() -> None:
                                         save_state(state_path, processed, completed_or_cancelled)
                                         logger.info("单号 %s 已为「%s」，后续不再检测直至再次变为 %s",
                                                     issue_key, jira_status, status_filter or "目标状态")
+                                        if delay_after_issue > 0:
+                                            time.sleep(delay_after_issue)
                                         continue
                                     current_assignee = (fields.get(BITABLE_FIELD_ASSIGNEE) or "").strip()
                                     if not current_assignee or not current_status:
@@ -272,6 +279,8 @@ def run() -> None:
                                                 logger.debug("回填单号 %s 经办人/状态失败: %s", issue_key, err)
                                             else:
                                                 logger.info("已回填单号 %s 经办人/状态", issue_key)
+                                    if delay_after_issue > 0:
+                                        time.sleep(delay_after_issue)
                                 for issue_key in list(completed_or_cancelled):
                                     jira_status = get_issue_status_only(
                                         jira_cfg["base_url"], issue_key,
@@ -295,6 +304,8 @@ def run() -> None:
                                         completed_or_cancelled.discard(issue_key)
                                         save_state(state_path, processed, completed_or_cancelled)
                                         logger.info("单号 %s 已变为「%s」，恢复检测", issue_key, jira_status)
+                                    if delay_after_issue > 0:
+                                        time.sleep(delay_after_issue)
                         except Exception as sync_ex:
                             logger.debug("状态同步/回填异常: %s", sync_ex)
             except Exception as e:

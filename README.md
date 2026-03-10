@@ -52,6 +52,7 @@ pip install -r requirements.txt
 | **AI** | `ai.api_key`、`ai.provider`（如 `gemini`）、`ai.base_url`、`ai.model` 可选 |`ai.api_key`、`ai.provider`（如 `gemini`）、`ai.base_url`、`ai.model` 可选 |
 | **Watcher** | |
 | `watcher.poll_interval_seconds` | 轮询间隔（秒），默认 300 |
+| `watcher.delay_after_issue_seconds` | 每处理或检查一个单子后等待秒数（默认 2），用于降低 Jira API 限流（429）概率 |
 | `watcher.state_file` | 状态文件路径，不填则用项目目录下 `watcher_state.json` |
 | `watcher.jql_extra` | 可选 JQL 条件，如 `AND project = PROJ` |
 | `watcher.assignee_extra` | 额外监听的经办人 Jira 用户名列表，如 `["YaoBo"]` 或逗号分隔字符串 `"YaoBo,user2"`，与当前用户一起被监控 |

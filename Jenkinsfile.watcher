@@ -1,5 +1,6 @@
 // Jira 分配监控 - Jenkins Pipeline 示例
-// 使用虚拟环境避免与机器上已有包冲突；运行前需在工作区放置 config.json（不提交到 Git）
+// 使用虚拟环境避免与机器上已有包冲突。config.json 不提交到 Git，需通过下方「配置」阶段拷贝到工作区：
+// 在 Jenkins 任务里添加环境变量 JIRA_P4_FEISHU_CONFIG_PATH = 本机 config.json 的完整路径（如 D:\working_tools\jira-p4-feishu\config.json）
 pipeline {
   agent any
   options {
@@ -7,6 +8,19 @@ pipeline {
     disableConcurrentBuilds()
   }
   stages {
+    stage('配置') {
+      steps {
+        script {
+          if (env.JIRA_P4_FEISHU_CONFIG_PATH?.trim()) {
+            if (isUnix()) {
+              sh "cp '${env.JIRA_P4_FEISHU_CONFIG_PATH}' config.json"
+            } else {
+              bat "copy /Y \"${env.JIRA_P4_FEISHU_CONFIG_PATH}\" config.json"
+            }
+          }
+        }
+      }
+    }
     stage('准备') {
       steps {
         script {
