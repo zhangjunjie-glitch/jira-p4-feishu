@@ -12,14 +12,26 @@ pipeline {
     stage('准备') {
       steps {
         dir('jira-p4-feishu') {
-          sh 'pip install -r requirements.txt -q'
+          script {
+            if (isUnix()) {
+              sh 'pip install -r requirements.txt -q'
+            } else {
+              bat 'pip install -r requirements.txt -q'
+            }
+          }
         }
       }
     }
     stage('运行 Watcher') {
       steps {
         dir('jira-p4-feishu') {
-          sh 'python -u jira_watcher.py'
+          script {
+            if (isUnix()) {
+              sh 'python -u jira_watcher.py'
+            } else {
+              bat 'python -u jira_watcher.py'
+            }
+          }
         }
       }
     }
