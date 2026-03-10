@@ -1,0 +1,13 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+.venv
+venv
+.env
+config.json
+watcher_state.json
+*.log
+.cursor
+*.md
+!README.md

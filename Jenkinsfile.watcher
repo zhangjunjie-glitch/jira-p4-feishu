@@ -1,0 +1,27 @@
+// Jira 分配监控 - Jenkins Pipeline 示例
+// 用法：在 Jenkins 中新建 Pipeline 任务，Pipeline 选择 "Pipeline script from SCM"，
+//       仓库指向本仓库，Script Path 填：Jenkinsfile.watcher
+// 或：Pipeline 选择 "Pipeline script"，把本文件内容粘贴进去，并去掉 dir('jira-p4-feishu') 或改为实际路径
+pipeline {
+  agent any
+  options {
+    timeout(time: 999, unit: 'DAYS')
+    disableConcurrentBuilds()
+  }
+  stages {
+    stage('准备') {
+      steps {
+        dir('jira-p4-feishu') {
+          sh 'pip install -r requirements.txt -q'
+        }
+      }
+    }
+    stage('运行 Watcher') {
+      steps {
+        dir('jira-p4-feishu') {
+          sh 'python -u jira_watcher.py'
+        }
+      }
+    }
+  }
+}

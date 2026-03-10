@@ -1,0 +1,8 @@
+config.json
+.env
+watcher_state.json
+jira_watcher.log
+__pycache__/
+*.pyc
+.venv/
+venv/
