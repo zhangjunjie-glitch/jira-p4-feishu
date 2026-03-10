@@ -201,6 +201,11 @@ docker run -d --name jira-watcher --restart unless-stopped \
    - 打开某次构建的 **控制台输出**，应看到 `[Watcher] ========  Jira 分配监控已启动  ========` 和「开始轮询 Jira」。
    - 在 Jira 里把某单子经办人设为自己、状态设为 Testing，若该单未写入多维表格，下一次轮询后应会发飞书并写表格。
 
+9. **控制台日志乱码（Windows）**
+   - **原因**：Windows 下 cmd 默认代码页多为 GBK，而 Python 输出 UTF-8，Jenkins 捕获时编码不一致会乱码。
+   - **已做**：`Jenkinsfile.watcher` 中已设置 `PYTHONIOENCODING=utf-8`，运行 Watcher 前执行 `chcp 65001`（UTF-8），多数情况下可减轻乱码。
+   - **仍乱码时**：在 Jenkins 所在机器的 JVM 启动参数中增加 `-Dfile.encoding=UTF-8`（例如 Windows 用 Jenkins 安装包时，在 `jenkins.xml` 的 `<arguments>` 里加上该参数后重启 Jenkins）。
+
 ### Windows / Linux 本机常驻
 
 - **Windows**：计划任务或 NSSM 将 `python -u jira_watcher.py` 设为登录/启动时运行，工作目录设为项目目录。

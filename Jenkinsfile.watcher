@@ -1,11 +1,15 @@
 // Jira 分配监控 - Jenkins Pipeline 示例
 // 使用虚拟环境避免与机器上已有包冲突。config.json 不提交到 Git，需通过下方「配置」阶段拷贝到工作区：
 // 在 Jenkins 任务里添加环境变量 JIRA_P4_FEISHU_CONFIG_PATH = 本机 config.json 的完整路径（如 D:\working_tools\jira-p4-feishu\config.json）
+// 若控制台日志中文乱码，请设置 PYTHONIOENCODING=utf-8（见下方 environment）并在 Jenkins 启动参数中加 -Dfile.encoding=UTF-8
 pipeline {
   agent any
   options {
     timeout(time: 999, unit: 'DAYS')
     disableConcurrentBuilds()
+  }
+  environment {
+    PYTHONIOENCODING = 'utf-8'
   }
   stages {
     stage('配置') {
@@ -39,7 +43,8 @@ pipeline {
           if (isUnix()) {
             sh '.venv/bin/python -u jira_watcher.py'
           } else {
-            bat '.venv\\Scripts\\python.exe -u jira_watcher.py'
+            // chcp 65001 使 cmd 使用 UTF-8，配合 PYTHONIOENCODING=utf-8 减轻日志乱码
+            bat 'chcp 65001 >nul && .venv\\Scripts\\python.exe -u jira_watcher.py'
           }
         }
       }
