@@ -45,21 +45,24 @@ def get_issues_assigned_to_me(
     email: str,
     api_token: str,
     jql_extra: Optional[str] = None,
+    assignee_extra: Optional[List[str]] = None,
     max_results: int = 50,
 ) -> Tuple[List[Tuple[str, str]], Optional[str]]:
     """
-    查询当前用户（认证身份）下「分配给我」的工单列表。
+    查询「经办人=当前用户」或「经办人在额外列表内」的工单。
 
-    Returns:
-        ([(issue_key, updated), ...], error_message)
-        - issue_key: 如 PROJ-123
-        - updated: Jira 返回的 updated 字段（ISO 字符串），用于去重与复跑判断
-        - error_message: None 表示成功，否则为错误信息
+    assignee_extra: 额外监听的经办人 Jira 用户名列表（如 ["YaoBo"]），与 currentUser() 一起用 assignee in (...) 查询。
     """
     base_url = base_url.rstrip("/")
-    jql = "assignee = currentUser() ORDER BY updated DESC"
+    assignees = ["currentUser()"]
+    for name in assignee_extra or []:
+        n = (name or "").strip()
+        if n:
+            assignees.append(f'"{n}"')
+    assignee_expr = "assignee in (" + ", ".join(assignees) + ")" if len(assignees) > 1 else "assignee = currentUser()"
+    jql = f"{assignee_expr} ORDER BY updated DESC"
     if (jql_extra or "").strip():
-        jql = f"assignee = currentUser() {jql_extra.strip()} ORDER BY updated DESC"
+        jql = f"{assignee_expr} {jql_extra.strip()} ORDER BY updated DESC"
     # Jira Cloud 已移除 /rest/api/2/search，改用 v3: /rest/api/3/search/jql
     url = f"{base_url}/rest/api/3/search/jql"
     auth = (email, api_token)

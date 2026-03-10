@@ -76,6 +76,13 @@ def run() -> None:
     log_path = Path(log_file_raw).resolve() if log_file_raw.strip() else root / "jira_watcher.log"
     logger = _setup_logging(log_path)
     jql_extra = (watcher_cfg.get("jql_extra") or "").strip()
+    assignee_extra_raw = watcher_cfg.get("assignee_extra")
+    if isinstance(assignee_extra_raw, list):
+        assignee_extra = [str(x).strip() for x in assignee_extra_raw if (x or "").strip()]
+    elif isinstance(assignee_extra_raw, str) and assignee_extra_raw.strip():
+        assignee_extra = [x.strip() for x in assignee_extra_raw.split(",") if x.strip()]
+    else:
+        assignee_extra = []
     status_filter = (watcher_cfg.get("status_filter") or "").strip()
     if status_filter:
         safe_status = status_filter.replace('"', '\\"')
@@ -93,7 +100,8 @@ def run() -> None:
     processed = load_state(state_path)
     logger.info("========  Jira 分配监控已启动  ========")
     logger.info("轮询间隔: %s 秒 | 状态文件: %s | 日志文件: %s", poll_interval, state_path, log_path)
-    logger.info("已记录 %s 个已处理单子，将按间隔轮询 Jira（经办人=当前用户%s）", len(processed), ("，状态=" + status_filter) if status_filter else "")
+    assignee_desc = "当前用户" + ((" + " + ", ".join(assignee_extra)) if assignee_extra else "")
+    logger.info("已记录 %s 个已处理单子，将按间隔轮询 Jira（经办人=%s%s）", len(processed), assignee_desc, ("，状态=" + status_filter) if status_filter else "")
 
     try:
         while True:
@@ -104,6 +112,7 @@ def run() -> None:
                     email=jira_cfg["email"],
                     api_token=jira_cfg["api_token"],
                     jql_extra=jql_extra if jql_extra else None,
+                    assignee_extra=assignee_extra if assignee_extra else None,
                     max_results=50,
                 )
                 if err:

@@ -8,7 +8,7 @@
 
 - **命令行**：`python main.py PROJ-1234`，向配置的飞书群发送该单号的 P4 变更摘要。
 - **群内 @ 机器人**：在飞书群 @ 机器人并发送 Jira 单号，机器人回复该单号的 P4 变更（需单独运行 `bot_server_ws.py` 并配置事件订阅，见下）。
-- **Jira 分配监控**：运行 `python jira_watcher.py` 常驻，按间隔轮询「经办人=当前用户」且可设状态（如 Testing）的单子，对新分配或已更新的单子自动执行与 main.py 相同的流程（P4 变更、多维表格、AI 测试范围、发飞书）。
+- **Jira 分配监控**：运行 `python jira_watcher.py` 常驻，按间隔轮询「经办人=当前用户或额外名单」且可设状态（如 Testing）的单子，对新分配或已更新的单子自动执行与 main.py 相同的流程（P4 变更、多维表格、AI 测试范围、发飞书）。
 
 ## 环境要求
 
@@ -51,6 +51,7 @@ pip install -r requirements.txt
 | `watcher.poll_interval_seconds` | 轮询间隔（秒），默认 300 |
 | `watcher.state_file` | 状态文件路径，不填则用项目目录下 `watcher_state.json` |
 | `watcher.jql_extra` | 可选 JQL 条件，如 `AND project = PROJ` |
+| `watcher.assignee_extra` | 额外监听的经办人 Jira 用户名列表，如 `["YaoBo"]` 或逗号分隔字符串 `"YaoBo,user2"`，与当前用户一起被监控 |
 | `watcher.status_filter` | 只监控该状态的单子，如 `Testing` |
 | `watcher.skip_if_in_bitable` | 为 true（默认）时，若该 JIRA 单号已存在于多维表格则跳过 |
 | `watcher.no_notify_if_no_cl` | 无 CL 时是否不往飞书发「暂无关联 CL」 |
