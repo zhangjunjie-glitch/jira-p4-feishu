@@ -91,7 +91,7 @@ agent --list-models
 ### Windows（PowerShell 或 CMD）
 
 ```powershell
-cd D:\tools
+cd D:\WORKING_TOOLS
 git clone https://github.com/anyrobert/cursor-api-proxy.git
 cd cursor-api-proxy
 npm install
@@ -139,10 +139,11 @@ node dist/cli.js
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
+| `CURSOR_AGENT_BIN` | `agent` | **agent 未加入 PATH 时必设**：填 `agent` 可执行文件的完整路径（如 `C:\Users\xxx\AppData\Local\Programs\cursor\agent.exe`） |
 | `CURSOR_BRIDGE_HOST` | `127.0.0.1` | 绑定地址 |
 | `CURSOR_BRIDGE_PORT` | `8765` | 端口 |
 | `CURSOR_BRIDGE_API_KEY` | — | 若设置，请求需带 `Authorization: Bearer <key>` |
-| `CURSOR_API_KEY` | — | 无头/自动化时替代 `agent login` |
+| `CURSOR_API_KEY` | — | 无头/自动化时替代 `agent login`，可不装 agent |
 
 例如指定端口后再启动：
 
@@ -181,14 +182,13 @@ npm start
    ```json
    "ai": {
      "api_key": "cursor-local",
-     "provider": "cursor",
      "base_url": "http://127.0.0.1:8765/v1",
-     "model": "cursor-default"
+     "model": "auto"
    }
    ```
 
    - 若代理设置了 `CURSOR_BRIDGE_API_KEY`，则 `api_key` 填该值。
-   - `model` 可填 `cursor-default` 或 `/v1/models` 返回的某个模型 id。
+   - `model` 可填 `auto`（由 Cursor 自动选择）或 `/v1/models` / `agent --list-models` 返回的某个模型 id（如 composer-1.5、gpt-5.2）。
 
 ---
 
@@ -203,9 +203,48 @@ npm start
 
 ## 八、故障排查
 
+### 代理日志出现：Command not found: agent
+
+若启动代理后，在**代理自己的控制台**里看到类似：
+
+```text
+Proxy error: Command not found: agent. Install Cursor CLI (agent) or set CURSOR_AGENT_BIN to its path.
+```
+
+说明代理在收到 `/v1/chat/completions` 请求时会去执行 `agent`，但当前环境里找不到该命令（未装或未加入 PATH）。任选其一即可：
+
+**做法一：指定 agent 的完整路径（推荐）**
+
+1. 在本机找到 `agent.exe` 或 `agent.cmd` 所在目录（例如安装 Cursor CLI 后可能在 `%USERPROFILE%\.local\bin` 或 Cursor 安装目录下）。  
+   在 PowerShell 中搜索示例：  
+   `Get-ChildItem -Path $env:USERPROFILE -Recurse -Filter "agent*" -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match "\.(exe|cmd)$" }`
+2. 在**启动代理的终端**里设置环境变量为该可执行文件的**完整路径**（含文件名），再启动：
+   ```powershell
+   $env:CURSOR_AGENT_BIN = "C:\Users\你的用户名\.local\bin\agent.exe"   # 改成你机器上的实际路径
+   npm start
+   ```
+3. 再次用 jira-p4-feishu 触发一次 AI 请求，代理日志中不应再报 Command not found。
+
+**做法二：安装 Cursor CLI 后把 agent 路径告诉代理**
+
+当前 cursor-api-proxy **必须**能执行到 `agent` 程序（会启动子进程调用 Cursor）。`CURSOR_API_KEY` 只是传给该进程做认证，不能代替可执行文件。因此需要：
+
+1. **安装 Cursor CLI**（若未装过）：在**管理员** PowerShell 中执行  
+   `irm 'https://cursor.com/install?win32=true' | iex`  
+   安装完成后**关闭并重新打开**一个 PowerShell。
+2. **查 agent 路径**：在新终端中执行  
+   `where.exe agent`  
+   若显示路径（如 `C:\Users\xxx\AppData\Local\...\agent.exe`），复制该路径。
+3. **用该路径启动代理**（在 cursor-api-proxy 目录下）：  
+   `$env:CURSOR_AGENT_BIN = "上一步得到的完整路径"; npm start`  
+   若 `where.exe agent` 无输出，说明仍未加入 PATH，可到 `%USERPROFILE%\.local\bin` 或安装脚本提示的目录下找 `agent.exe`，再设 `CURSOR_AGENT_BIN` 为该文件完整路径。
+
+---
+
 | 现象 | 可能原因 | 处理 |
 |------|----------|------|
-| `agent: command not found` | Cursor CLI 未装或未加入 PATH | 重新执行安装命令，新开终端，或使用安装目录下的 `agent` 绝对路径 |
+| 代理日志：`Command not found: agent` | 代理运行时找不到 `agent` 命令 | 安装 Cursor CLI 后设 `CURSOR_AGENT_BIN` 为 agent 的**完整路径**（见上） |
+| `agent: command not found`（本机终端） | Cursor CLI 未装或未加入 PATH | 重新执行安装命令，新开终端，或设 `CURSOR_AGENT_BIN` 后启动代理 |
 | `agent login` 失败 | 网络或账号问题 | 检查网络、重试，或配置 `CURSOR_API_KEY` |
 | `npm start` 报错端口占用 | 8765 已被占用 | 换端口：设 `CURSOR_BRIDGE_PORT` 并同步改 config 的 `base_url` |
 | 项目请求代理超时 | 代理未启动或防火墙拦截 | 确认代理已 `npm start`，且本机访问 `http://127.0.0.1:8765/health` 正常 |

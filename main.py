@@ -24,7 +24,7 @@ from jira_client import (
     get_issue_status,
     get_issue_assignee_and_status,
 )
-from p4_client import get_changed_files_for_cls, get_project_context
+from p4_client import get_changed_files_for_cls, get_project_context, get_game_project_structure, get_file_contents_for_paths, get_related_code_context
 from feishu_client import (
     get_tenant_access_token,
     send_text_message,
@@ -208,19 +208,104 @@ def run_single_issue_flow(
                 project_context = get_project_context(all_paths, cwd=p4_cwd)
             except Exception:
                 pass
+    game_project_context = ""
     ai_cfg = config.get("ai") or {}
+    project_path = (ai_cfg.get("project_path") or "").strip()
+    depot_prefix = (ai_cfg.get("depot_prefix") or "").strip().replace("\\", "/").rstrip("/")
+    focus_subdirs = []
+    if depot_prefix and files_by_cl:
+        for item in files_by_cl:
+            if len(item) >= 2 and item[1]:
+                for depot_path in item[1]:
+                    if not (depot_path or "").strip():
+                        continue
+                    p = depot_path.strip().replace("\\", "/")
+                    if p.startswith(depot_prefix + "/") or p.startswith(depot_prefix):
+                        rel = p[len(depot_prefix):].lstrip("/")
+                        if rel:
+                            parts = rel.split("/")
+                            if len(parts) > 1:
+                                parent = "/".join(parts[:-1])
+                                focus_subdirs.append(parent)
+                            elif len(parts) == 1:
+                                focus_subdirs.append(parts[0])
+        focus_subdirs = list(dict.fromkeys(focus_subdirs))[:20]
+    if project_path:
+        try:
+            game_project_context = get_game_project_structure(
+                project_path,
+                focus_subdirs=focus_subdirs if focus_subdirs else None,
+                max_chars=2000,
+            )
+            if game_project_context and os.environ.get("FEISHU_REPORT_DOC_DEBUG"):
+                print(f"[{issue_key}] 已加入游戏工程目录摘要(共{len(game_project_context)}字)" + ("，含 P4 变更相关目录" if focus_subdirs else ""), file=sys.stderr)
+        except Exception:
+            pass
     if (ai_cfg.get("api_key") or "").strip() and full_text:
         try:
-            test_scope = get_test_scope_suggestion(
+            # 传入 AI 的即为 P4 分析得到的 full_text（与飞书/多维表格中的「变更内容」同源）
+            print(f"[{issue_key}] 将 P4 变更内容(共{len(full_text)}字)传入 AI 分析测试范围", file=sys.stderr)
+            if os.environ.get("FEISHU_REPORT_DOC_DEBUG"):
+                prefix = (full_text or "")[:300].replace("\n", " ")
+                print(f"[{issue_key}] 变更内容前 300 字: {prefix}...", file=sys.stderr)
+            change_paths = []
+            if files_by_cl:
+                for item in files_by_cl:
+                    if len(item) > 1 and item[1]:
+                        change_paths.extend(item[1])
+                change_paths = list(dict.fromkeys(change_paths))
+            p4_file_contents = ""
+            if change_paths:
+                try:
+                    p4_file_contents = get_file_contents_for_paths(change_paths, cwd=p4_cwd) or ""
+                except Exception:
+                    pass
+            
+            # === 新增：获取关联代码上下文 ===
+            related_code_context = ""
+            if change_paths and depot_prefix:
+                try:
+                    if os.environ.get("FEISHU_REPORT_DOC_DEBUG"):
+                        print(f"[{issue_key}] 正在通过 p4 grep 查找关联代码文件...", file=sys.stderr)
+                    related_code_context = get_related_code_context(
+                        changed_paths=change_paths,
+                        depot_prefix=depot_prefix,
+                        cwd=p4_cwd
+                    )
+                    if related_code_context and os.environ.get("FEISHU_REPORT_DOC_DEBUG"):
+                        print(f"[{issue_key}] 成功获取关联代码上下文(共{len(related_code_context)}字)", file=sys.stderr)
+                except Exception as e:
+                    print(f"[{issue_key}] 提示: 获取关联代码失败: {e}", file=sys.stderr)
+            
+            # 将关联代码拼接到原有的 p4_file_contents 中，一起发给 AI
+            if related_code_context:
+                p4_file_contents = (p4_file_contents + "\n\n" + related_code_context).strip()
+            # =================================
+
+            if os.environ.get("FEISHU_REPORT_DOC_DEBUG"):
+                print(f"[{issue_key}] P4 print 拉取内容长度: {len(p4_file_contents or '')} 字" + ("（为空则变更多为 xlsx/二进制，未拉取到正文）" if not (p4_file_contents or "").strip() else ""), file=sys.stderr)
+            test_scope, raw_response = get_test_scope_suggestion(
                 full_text,
                 api_key=ai_cfg.get("api_key") or "",
                 base_url=ai_cfg.get("base_url") or None,
                 model=ai_cfg.get("model") or None,
                 project_context=project_context or None,
+                game_project_context=game_project_context or None,
+                game_description=(ai_cfg.get("game_description") or "").strip() or None,
+                change_list=change_paths if change_paths else None,
+                p4_file_contents=p4_file_contents if p4_file_contents else None,
+                p4_cwd=p4_cwd,
+                depot_prefix=depot_prefix,
             )
+            # 日志原样输出 AI 返回内容，不做规则检查
+            if (raw_response or "").strip():
+                snippet = (raw_response or "").strip()
+                snippet = snippet[:500] + ("..." if len(snippet) > 500 else "")
+                print(f"[{issue_key}] AI 原始返回(共{len((raw_response or '').strip())}字): {snippet}", file=sys.stderr)
+            if not (test_scope or "").strip():
+                print(f"[{issue_key}] 提示: AI 未返回测试范围，请检查 Cursor 代理是否已启动且 base_url 可从本机访问（当前: {ai_cfg.get('base_url') or '默认 127.0.0.1:8765'}）", file=sys.stderr)
         except Exception as e:
-            if os.environ.get("FEISHU_REPORT_DOC_DEBUG"):
-                print(f"提示: AI 测试范围分析失败: {e}", file=sys.stderr)
+            print(f"[{issue_key}] 提示: AI 测试范围分析失败: {e}", file=sys.stderr)
     app_token = feishu_cfg.get("bitable_app_token") or ""
     table_id = feishu_cfg.get("bitable_table_id") or ""
     wiki_node = (feishu_cfg.get("bitable_wiki_node_token") or "").strip()

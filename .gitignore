@@ -7,6 +7,7 @@ __pycache__/
 .venv/
 venv/
 # 调试/临时输出
+last_ai_prompt.txt
 bitable_debug.txt
 bitable_first_keys.txt
 bitable_list_records_first.txt

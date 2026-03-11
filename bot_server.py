@@ -19,7 +19,7 @@ except ImportError:
 from flask import Flask, request, jsonify
 
 from jira_client import get_issue_cls, get_issue_reporter, get_issue_assignee, get_issue_status
-from p4_client import get_changed_files_for_cls, get_project_context
+from p4_client import get_changed_files_for_cls, get_project_context, get_game_project_structure, get_file_contents_for_paths
 from feishu_client import (
     get_tenant_access_token,
     reply_to_message,
@@ -164,16 +164,66 @@ def handle_message_event(message_id: str, content_text: str) -> None:
                 project_context = get_project_context(all_paths, cwd=p4_cwd)
             except Exception:
                 pass
-    if reply is None and full_text and (config.get("ai") or {}).get("api_key"):
+    game_project_context = ""
+    ai_cfg = config.get("ai") or {}
+    project_path = (ai_cfg.get("project_path") or "").strip()
+    depot_prefix = (ai_cfg.get("depot_prefix") or "").strip().replace("\\", "/").rstrip("/")
+    focus_subdirs = []
+    if depot_prefix and files_by_cl:
+        for item in files_by_cl:
+            if len(item) >= 2 and item[1]:
+                for depot_path in item[1]:
+                    if not (depot_path or "").strip():
+                        continue
+                    p = depot_path.strip().replace("\\", "/")
+                    if p.startswith(depot_prefix + "/") or p.startswith(depot_prefix):
+                        rel = p[len(depot_prefix):].lstrip("/")
+                        if rel:
+                            parts = rel.split("/")
+                            if len(parts) > 1:
+                                focus_subdirs.append("/".join(parts[:-1]))
+                            elif len(parts) == 1:
+                                focus_subdirs.append(parts[0])
+        focus_subdirs = list(dict.fromkeys(focus_subdirs))[:20]
+    if project_path:
         try:
-            ai_cfg = config.get("ai") or {}
-            test_scope = get_test_scope_suggestion(
+            game_project_context = get_game_project_structure(
+                project_path,
+                focus_subdirs=focus_subdirs if focus_subdirs else None,
+                max_chars=2000,
+            ) or ""
+        except Exception:
+            pass
+    if reply is None and full_text and (ai_cfg.get("api_key") or "").strip():
+        try:
+            change_paths = []
+            if files_by_cl:
+                for item in files_by_cl:
+                    if len(item) > 1 and item[1]:
+                        change_paths.extend(item[1])
+                change_paths = list(dict.fromkeys(change_paths))
+            p4_file_contents = ""
+            if change_paths:
+                try:
+                    p4_file_contents = get_file_contents_for_paths(change_paths, cwd=p4_cwd) or ""
+                except Exception:
+                    pass
+            test_scope, raw_response = get_test_scope_suggestion(
                 full_text,
                 api_key=ai_cfg.get("api_key") or "",
                 base_url=ai_cfg.get("base_url") or None,
                 model=ai_cfg.get("model") or None,
                 project_context=project_context or None,
+                game_project_context=game_project_context or None,
+                game_description=(ai_cfg.get("game_description") or "").strip() or None,
+                change_list=change_paths if change_paths else None,
+                p4_file_contents=p4_file_contents if p4_file_contents else None,
             )
+            # 日志原样输出 AI 返回内容，不做规则检查
+            if (raw_response or "").strip():
+                snippet = (raw_response or "").strip()
+                snippet = snippet[:500] + ("..." if len(snippet) > 500 else "")
+                print(f"[Bot][{issue_key}] AI 原始返回(共{len((raw_response or '').strip())}字): {snippet}", flush=True)
         except Exception:
             pass
     doc_url = ""

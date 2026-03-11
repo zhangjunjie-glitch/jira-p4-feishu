@@ -49,7 +49,7 @@ pip install -r requirements.txt
 | `tenant_base_url` | 企业飞书域名，如 `https://xd.feishu.cn`，用于生成消息中的多维表格可打开链接（不填则用 open.feishu.cn 链接，可能提示页面不存在） |
 | `bitable_view_id` | 多维表格视图 ID（可选），填后链接会带 `&view=xxx`，直接打开指定视图 |
 | `assignee_open_id_map` | 可选。Jira 经办人显示名 → 飞书 open_id，用于消息中 @ 经办人，如 `{"姚博 YaoBo": "ou_xxx"}`。open_id 可在飞书管理后台或通过「获取用户信息」API 获取 |
-| **AI** | `ai.api_key`、`ai.base_url`（默认 `http://127.0.0.1:8765/v1`）、`ai.model`（默认 `cursor-default`）。需先在本机启动 cursor-api-proxy 等 Cursor 本地代理 |
+| **AI** | `ai.api_key`、`ai.base_url`、`ai.model`。可选 `ai.project_path`：本机游戏工程目录；`ai.depot_prefix`：P4 前缀以做聚焦扫描；`ai.game_description`：一句话描述游戏类型与主要模块（如「种田生活模拟，含作物、烹饪、商店、任务成就」），使测试范围更贴合项目。需先在本机启动 cursor-api-proxy |
 | **Watcher** | |
 | `watcher.poll_interval_seconds` | 轮询间隔（秒），默认 300 |
 | `watcher.delay_after_issue_seconds` | 每处理或检查一个单子后等待秒数（默认 2），用于降低 Jira API 限流（429）概率 |

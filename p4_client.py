@@ -342,6 +342,93 @@ def describe_cl_full(cl: int, cwd: Optional[str] = None) -> tuple[str, List[str]
     return submit_time, paths, result_summaries, None
 
 
+# 方法2：用 p4 print 拉取变更文件内容，供 AI 分析（不依赖 agent 工作区）
+_P4_PRINT_MAX_FILES = 15
+_P4_PRINT_MAX_CHARS_PER_FILE = 2000
+_P4_PRINT_MAX_TOTAL_CHARS = 8000
+
+
+def get_file_contents_for_paths(
+    depot_paths: List[str],
+    cwd: Optional[str] = None,
+    max_files: int = _P4_PRINT_MAX_FILES,
+    max_chars_per_file: int = _P4_PRINT_MAX_CHARS_PER_FILE,
+    max_total_chars: int = _P4_PRINT_MAX_TOTAL_CHARS,
+) -> str:
+    """
+    对变更的 depot 路径用 p4 print 取文件内容，拼成一段文本供 AI 使用。
+    跳过二进制/Office 等不可读类型；单文件与总长度截断，避免 prompt 过大。
+
+    Returns:
+        拼接后的内容，格式：--- depot_path ---\\n 内容\\n\\n；无内容或失败返回空字符串。
+    """
+    if not depot_paths:
+        return ""
+    lines = []
+    total = 0
+    for path in depot_paths[:max_files]:
+        path = (path or "").strip().split("#")[0]
+        if not path or not path.startswith("//"):
+            continue
+        ext = (path.split(".")[-1].lower() if "." in path else "").split("#")[0]
+        
+        # 如果是 xlsx/xlsm，我们不拉取二进制正文，而是尝试调用 _excel_change_summary 获取单元格变更摘要
+        if ext in ("xlsx", "xlsm"):
+            # 需要知道当前的 rev，这里我们假设它在 p4 files 或 p4 fstat 中能查到，或者简单地传 0 并不完全准确
+            # 为了简单起见，我们直接用 p4 describe 里已经解析好的摘要（如果能传进来的话）
+            # 但这里我们没有 rev，所以我们用 p4 fstat 查一下最新的 rev
+            try:
+                fstat_r = subprocess.run(["p4", "fstat", "-T", "headRev", path], cwd=cwd, capture_output=True, text=True, timeout=10)
+                if fstat_r.returncode == 0 and fstat_r.stdout:
+                    import re
+                    rev_m = re.search(r'\.\.\.\s+headRev\s+(\d+)', fstat_r.stdout)
+                    if rev_m:
+                        rev = int(rev_m.group(1))
+                        excel_summary = _excel_change_summary(path, rev, cwd=cwd)
+                        if excel_summary:
+                            block = f"--- {path} (Excel 变更摘要) ---\n{excel_summary}\n\n"
+                            lines.append(block)
+                            total += len(block)
+            except Exception:
+                pass
+            continue
+            
+        if ext in _BINARY_EXTENSIONS:
+            continue
+        try:
+            r = subprocess.run(
+                ["p4", "print", "-q", path],
+                cwd=cwd,
+                capture_output=True,
+                timeout=30,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        if r.returncode != 0:
+            continue
+        raw = r.stdout
+        if not raw:
+            continue
+        try:
+            text = raw.decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        if "\x00" in text or any(ord(c) < 32 and c not in "\n\r\t" for c in text[:100]):
+            continue
+        text = text.strip()
+        if len(text) > max_chars_per_file:
+            text = text[:max_chars_per_file] + "\n...（已截断）"
+        block = f"--- {path} ---\n{text}\n\n"
+        if total + len(block) > max_total_chars:
+            remain = max_total_chars - total - 60
+            if remain > 0:
+                lines.append(f"--- {path} ---\n{text[:remain]}\n...（已截断）\n\n")
+            break
+        lines.append(block)
+        total += len(block)
+    return "".join(lines).strip() if lines else ""
+
+
 def get_changed_files_for_cls(
     cl_list: List[int],
     cwd: Optional[str] = None,
@@ -461,3 +548,230 @@ def get_project_context(depot_paths: List[str], cwd: Optional[str] = None) -> st
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
     return "\n".join(lines).strip() if len(lines) > 1 else ""
+
+
+def get_game_project_structure(
+    project_path: str,
+    focus_subdirs: Optional[List[str]] = None,
+    max_depth_root: int = 2,
+    max_depth_focus: int = 3,
+    max_chars: int = 2000,
+) -> str:
+    """
+    从本机游戏工程目录收集目录结构摘要，供 AI 结合工程全貌给出游戏向测试范围。
+    - 若 focus_subdirs 为空：只扫根目录下 max_depth_root 层（默认 2 层）。
+    - 若 focus_subdirs 非空（通常由 P4 变更路径得出）：根目录扫 1 层；对每个 focus 子目录扫 max_depth_focus 层（默认 4 层），便于结合变更做更深结构。
+    若路径不存在或无权限则返回空字符串。
+    """
+    try:
+        from pathlib import Path
+    except ImportError:
+        return ""
+    if not (project_path or "").strip():
+        return ""
+    root = Path(project_path.strip()).resolve()
+    if not root.is_dir():
+        return ""
+    lines = [f"游戏工程本地路径：{root}", ""]
+    try:
+        # 根目录：扫 max_depth_root 层（或 focus 时只扫 1 层）
+        depth_root = 1 if focus_subdirs else max_depth_root
+        dirs_top = []
+        dirs_second = []
+        file_exts_root = {}
+        for entry in sorted(root.iterdir())[:50]:
+            if entry.name.startswith("."):
+                continue
+            if entry.is_dir():
+                dirs_top.append(entry.name)
+                if depth_root >= 2:
+                    for sub in sorted(entry.iterdir())[:20]:
+                        if sub.name.startswith("."):
+                            continue
+                        if sub.is_dir():
+                            dirs_second.append(f"  {entry.name}/{sub.name}")
+                        else:
+                            ext = sub.suffix.lower() or "(无后缀)"
+                            file_exts_root[ext] = file_exts_root.get(ext, 0) + 1
+            else:
+                ext = entry.suffix.lower() or "(无后缀)"
+                file_exts_root[ext] = file_exts_root.get(ext, 0) + 1
+        if dirs_top:
+            lines.append("根目录一级：")
+            lines.extend(f"  - {d}" for d in dirs_top[:25])
+            lines.append("")
+        if dirs_second:
+            lines.append("根目录二级示例：")
+            lines.extend(dirs_second[:20])
+            lines.append("")
+        if file_exts_root:
+            summary = "、".join(f"{k}({c})" for k, c in sorted(file_exts_root.items(), key=lambda x: -x[1])[:15])
+            lines.append(f"根目录文件类型示例：{summary}")
+            lines.append("")
+
+        # 根据 P4 变更聚焦的子目录：扫更深
+        if focus_subdirs:
+            seen = set()
+            for rel in focus_subdirs[:8]:  # 最多 8 个 focus 目录，控制总长度
+                rel = (rel or "").strip().replace("\\", "/").strip("/")
+                if not rel or rel in seen:
+                    continue
+                seen.add(rel)
+                focus_dir = root / rel
+                if not focus_dir.is_dir():
+                    continue
+                lines.append(f"【P4 变更相关】{rel}/ （下 {max_depth_focus} 层）")
+                _append_dir_tree(focus_dir, lines, max_depth=max_depth_focus, indent="  ", max_entries_per_dir=12)
+                lines.append("")
+        out = "\n".join(lines).strip()
+        return out[:max_chars] if out else ""
+    except (PermissionError, OSError):
+        return ""
+
+
+def _append_dir_tree(
+    directory: "Path",
+    lines: List[str],
+    max_depth: int,
+    indent: str,
+    max_entries_per_dir: int,
+    current_depth: int = 0,
+) -> None:
+    """递归列出目录结构，最多 max_depth 层。"""
+    try:
+        from pathlib import Path
+    except ImportError:
+        return
+    if current_depth >= max_depth:
+        return
+    entries = sorted(directory.iterdir())[:max_entries_per_dir]
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        if entry.is_dir():
+            lines.append(f"{indent}- {entry.name}/")
+            _append_dir_tree(
+                entry,
+                lines,
+                max_depth=max_depth,
+                indent=indent + "  ",
+                max_entries_per_dir=max_entries_per_dir,
+                current_depth=current_depth + 1,
+            )
+        else:
+            ext = entry.suffix.lower() or "(无后缀)"
+            lines.append(f"{indent}- {entry.name} ({ext})")
+    if len(list(directory.iterdir())) > max_entries_per_dir:
+        lines.append(f"{indent}  ... 已截断")
+
+
+def get_related_code_context(
+    changed_paths: List[str],
+    depot_prefix: str,
+    cwd: Optional[str] = None,
+    max_keywords: int = 3,
+    max_related_files: int = 3,
+    max_chars_per_file: int = 1500
+) -> str:
+    """
+    通过提取变更文件中的关键字，使用 p4 grep 查找关联的代码文件，并返回其内容。
+    供 AI 分析更准确的测试范围。
+    """
+    if not changed_paths or not depot_prefix:
+        return ""
+
+    # 1. 提取关键字：针对代码文件和配置表，提取文件名作为关键字
+    keywords = []
+    # 增加 xlsx/xlsm 支持，因为配置表的文件名通常也是代码中引用的类名/表名
+    code_exts = {"cs", "lua", "ts", "js", "py", "cpp", "h", "xlsx", "xlsm"}
+    for path in changed_paths:
+        ext = (path.split(".")[-1].lower() if "." in path else "").split("#")[0]
+        if ext in code_exts:
+            # 提取文件名，例如 //depot/Client/CropComponent.cs -> CropComponent
+            # 例如 //depot/Config/logic/TableCrop.xlsx -> TableCrop
+            filename = path.split("/")[-1].split(".")[0]
+            # 过滤掉太短或太常见的词，防止搜索爆炸
+            if len(filename) > 3 and filename.lower() not in ["main", "manager", "config", "utils", "data", "table"]:
+                keywords.append(filename)
+                
+    # 去重并限制关键字数量
+    keywords = list(dict.fromkeys(keywords))[:max_keywords]
+    
+    if os.environ.get("FEISHU_REPORT_DOC_DEBUG"):
+        print(f"[P4 Grep Debug] 提取到的搜索关键字: {keywords}", flush=True)
+
+    if not keywords:
+        return ""
+
+    related_paths = set()
+    
+    # 2. 转变逻辑：放弃使用极度消耗性能的 p4 grep（搜索文件内容）
+    # 改为使用 p4 files 搜索【文件名包含关键字】的代码文件。这种方式速度极快，且不会触发服务器的 revision limit 限制。
+    search_scope_base = f"{depot_prefix}/Client" if "Client" not in depot_prefix else depot_prefix
+    
+    for kw in keywords:
+        if len(related_paths) >= max_related_files:
+            break
+            
+        # 清理关键字
+        import re
+        clean_kw = re.sub(r'[^a-zA-Z0-9_]', '', kw)
+        if len(clean_kw) < 3:
+            continue
+            
+        # P4 路径匹配区分大小写，我们尝试原词、首字母大写、全小写三种组合
+        kw_variants = list(set([clean_kw, clean_kw.capitalize(), clean_kw.lower()]))
+        
+        for variant in kw_variants:
+            if len(related_paths) >= max_related_files:
+                break
+                
+            # 构造通配符路径，例如 //FantasyWorld/stage/Client/...*Crop*.cs
+            spec = f"{search_scope_base}/...*{variant}*.cs"
+            cmd = ["p4", "files", "-m", "5", spec]
+            
+            if os.environ.get("FEISHU_REPORT_DOC_DEBUG"):
+                print(f"[P4 Files Debug] 正在按文件名搜索: {' '.join(cmd)}", flush=True)
+                
+            try:
+                r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=10)
+                if r.returncode == 0 and r.stdout:
+                    for line in r.stdout.splitlines():
+                        # p4 files 输出格式: //depot/path/file.cs#1 - add change 123 (text)
+                        p = line.split("#")[0].strip()
+                        if p and p.endswith(".cs") and p not in changed_paths:
+                            related_paths.add(p)
+                            if len(related_paths) >= max_related_files:
+                                break
+            except Exception as e:
+                if os.environ.get("FEISHU_REPORT_DOC_DEBUG"):
+                    print(f"[P4 Files Debug] 搜索异常: {e}", flush=True)
+                continue
+
+    if os.environ.get("FEISHU_REPORT_DOC_DEBUG"):
+        print(f"[P4 Grep Debug] 找到的关联文件: {related_paths}", flush=True)
+
+    if not related_paths:
+        return ""
+
+    # 3. 读取这些关联文件的内容
+    lines = ["【以下是工程中引用了本次变更模块的关联代码文件，供推断影响范围参考】\n"]
+    for path in list(related_paths)[:max_related_files]:
+        if os.environ.get("FEISHU_REPORT_DOC_DEBUG"):
+            print(f"[P4 Print Debug] 正在拉取关联文件内容: {path}", flush=True)
+        try:
+            r = subprocess.run(["p4", "print", "-q", path], cwd=cwd, capture_output=True, timeout=10)
+            if r.returncode == 0 and r.stdout:
+                text = r.stdout.decode("utf-8", errors="replace").strip()
+                if len(text) > max_chars_per_file:
+                    text = text[:max_chars_per_file] + "\n...（已截断）"
+                lines.append(f"--- 关联文件: {path} ---\n{text}\n")
+            elif r.returncode != 0 and os.environ.get("FEISHU_REPORT_DOC_DEBUG"):
+                print(f"[P4 Print Debug] 拉取失败，returncode: {r.returncode}, stderr: {r.stderr}", flush=True)
+        except Exception as e:
+            if os.environ.get("FEISHU_REPORT_DOC_DEBUG"):
+                print(f"[P4 Print Debug] 拉取异常: {e}", flush=True)
+            continue
+
+    return "\n".join(lines)
+
