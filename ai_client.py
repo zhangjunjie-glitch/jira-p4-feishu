@@ -507,7 +507,7 @@ def get_test_scope_suggestion(
         
         # === 新增：如果返回错误，尝试重启代理并重试一次 ===
         if "HTTP Error" in agent_log or "Exception" in agent_log or not raw:
-            print(f"[AI] 接口调用失败或未返回内容，尝试重启代理...", flush=True)
+            print(f"[AI] 接口调用失败或未返回内容 (日志: {agent_log})，尝试重启代理...", flush=True)
             # 提取端口号
             import urllib.parse
             port = "8765"
@@ -524,6 +524,10 @@ def get_test_scope_suggestion(
             if is_local and _restart_proxy(port):
                 print(f"[AI] 代理重启成功，正在重试请求...", flush=True)
                 raw, agent_log = _call_cursor(api_key, base, model_name, messages)
+                if "HTTP Error" in agent_log or "Exception" in agent_log or not raw:
+                     print(f"[AI] 重试请求依然失败 (日志: {agent_log})", flush=True)
+                else:
+                     print(f"[AI] 重试请求成功！", flush=True)
             elif not is_local:
                 print(f"[AI] 代理地址非本地 ({base})，跳过重启。", flush=True)
         # =================================================
